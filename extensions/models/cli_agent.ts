@@ -4033,7 +4033,7 @@ export async function verifyRepositoryExpectation(
 }
 
 /**
- * Swamp model definition for `@mgreten/cli-agent`.
+ * Swamp model definition for `@funsaized/cli-agent`.
  *
  * Provides native usage collection plus the existing invocation/catalog methods:
  * - `collectLocalUsage` — aggregate one local day from native client stores
@@ -5136,7 +5136,7 @@ export async function collectAmpUsageWithCache(
 export const CLI_AGENT_VERSION = "2026.09.03.2";
 
 export const model = {
-  type: "@mgreten/cli-agent",
+  type: "@funsaized/cli-agent",
   version: CLI_AGENT_VERSION,
   globalArguments: GlobalArgsSchema,
   upgrades: [

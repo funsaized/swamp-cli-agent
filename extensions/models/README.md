@@ -1,4 +1,4 @@
-# @mgreten/cli-agent
+# @funsaized/cli-agent
 
 A multi-provider CLI agent invoker for [swamp](https://swamp.club). Runs
 coding-agent CLI tools — Claude Code, OpenCode, Amp, Gemini CLI, OpenAI
@@ -11,13 +11,13 @@ collection, giving you a queryable history of all agent runs across providers.
 ## Installation
 
 ```sh
-swamp extension pull @mgreten/cli-agent
+swamp extension pull @funsaized/cli-agent
 ```
 
 Then create a model instance:
 
 ```sh
-swamp model create my-agent --type @mgreten/cli-agent
+swamp model create my-agent --type @funsaized/cli-agent
 ```
 
 ## Setup
@@ -28,7 +28,7 @@ Configure global arguments on the model instance. All have sensible defaults:
 # .swamp.yaml (or pass via --global-args)
 models:
   my-agent:
-    type: "@mgreten/cli-agent"
+    type: "@funsaized/cli-agent"
     globalArgs:
       defaultProvider: claude     # claude | opencode | amp | gemini | codex | grok | pi
       defaultModel: opus          # schema default (Claude-first); see model resolution below
@@ -189,7 +189,7 @@ swamp model method run my-agent listProviders
 
 Prefer this over hardcoding provider names in downstream docs or tooling. The
 JSON Schema enum on `defaultProvider` (`swamp model type describe
-@mgreten/cli-agent --json`) is equivalent for validation; this method is the
+@funsaized/cli-agent --json`) is equivalent for validation; this method is the
 typed runtime catalog.
 
 ### `listModels`
@@ -225,7 +225,7 @@ authoritative factory state without advancing it. `continueFactoryOrb` resumes
 only the stored thread. `archiveFactoryOrb` requires the configured terminal
 stage and evidence, no pending approvals, and a clean registered checkout.
 
-Use a dedicated `@mgreten/cli-agent` model instance for orb dispatch so its
+Use a dedicated `@funsaized/cli-agent` model instance for orb dispatch so its
 per-model serialization does not contend with ordinary local invocations. The
 calling repository should own the workflow and factory-specific values. The
 transport always uses standard Amp medium mode and never enables Fast mode.

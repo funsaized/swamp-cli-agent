@@ -1,6 +1,6 @@
 # swamp-cli-agent
 
-[swamp](https://swamp.club) extension `@mgreten/cli-agent` — invoke CLI coding
+[swamp](https://swamp.club) extension `@funsaized/cli-agent` — invoke CLI coding
 agents (claude, opencode, amp, gemini, codex, grok) with typed inputs and capture
 structured outputs including tokens, cost, duration, retries, and exit code.
 
@@ -12,7 +12,7 @@ method reference, schema details, and configuration options.
 ## Install
 
 ```sh
-swamp extension pull @mgreten/cli-agent
+swamp extension pull @funsaized/cli-agent
 ```
 
 ## Repository layout

@@ -110,7 +110,7 @@ function fixture(options: { ampOutput?: string; ampSuccess?: boolean } = {}) {
     },
   };
   const context = {
-    modelType: "@mgreten/cli-agent",
+    modelType: "@funsaized/cli-agent",
     modelId: ORB_ID,
     globalArgs: { ampPath: "fake-amp" },
     dataRepository: repository,

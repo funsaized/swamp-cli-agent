@@ -5152,7 +5152,7 @@ export async function collectAmpUsageWithCache(
   };
 }
 
-export const CLI_AGENT_VERSION = "2026.09.03.2";
+export const CLI_AGENT_VERSION = "2026.09.05.1";
 
 export const model = {
   type: "@funsaized/cli-agent",
@@ -5376,9 +5376,15 @@ export const model = {
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
     {
-      toVersion: CLI_AGENT_VERSION,
+      toVersion: "2026.09.03.2",
       description:
         "Add optional opencodeAgent to invoke/invokeAndParse plus native OpenCode slash-command routing (opencode run --command). A machine-global agent then owns model, variant, prompt, permissions, and tools (no --model, no synthetic OPENCODE_CONFIG_CONTENT, no --dangerously-skip-permissions); the actual agent/model/variant are resolved from `opencode debug config`/`opencode debug agent` before launch and recorded as additive optional fields (agent, variant, routingSource). Additive argument and attribute change; no attribute rewrite needed.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: CLI_AGENT_VERSION,
+      description:
+        "Honor sandboxCredentialAccess on macOS Seatbelt by exposing only the selected provider's known file-backed login credentials in provider mode; isolated mode remains fully masked. Execution-only change; no attribute rewrite needed.",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

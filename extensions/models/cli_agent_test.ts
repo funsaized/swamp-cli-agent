@@ -2752,6 +2752,48 @@ Deno.test({
 });
 
 Deno.test({
+  name:
+    "runCli: POSIX early parent exit terminates its pipe-holding descendant",
+  ignore: posixOnly,
+  async fn() {
+    await withPidFiles(2, async ([parentFile, descendantFile]) => {
+      const descendantSource = `
+        await Deno.writeTextFile(${
+        JSON.stringify(descendantFile)
+      }, String(Deno.pid));
+        Deno.addSignalListener("SIGTERM", () => {});
+        setInterval(() => {}, 60_000);
+      `;
+      const source = `
+        await Deno.writeTextFile(${
+        JSON.stringify(parentFile)
+      }, String(Deno.pid));
+        new Deno.Command(Deno.execPath(), {
+          args: ["eval", ${JSON.stringify(descendantSource)}],
+          stdout: "inherit", stderr: "inherit"
+        }).spawn();
+        while (!(await Deno.readTextFile(${JSON.stringify(descendantFile)}))) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        Deno.exit(1);
+      `;
+      const result = await guardedInvocation(
+        runCli(denoEval(source), {
+          wallTimeoutMs: 10_000,
+        }),
+        [parentFile, descendantFile],
+      );
+      assertEquals(result.code, 1);
+      assertEquals(result.success, false);
+      assertEquals(result.timedOut, false);
+      const pids = await readPidFiles([parentFile, descendantFile]);
+      assertEquals(pids.length, 2);
+      await Promise.all(pids.map(waitForProcessExit));
+    });
+  },
+});
+
+Deno.test({
   name: "runCli: POSIX timeout terminates child and pipe-holding grandchild",
   ignore: posixOnly,
   async fn() {
@@ -5282,5 +5324,109 @@ Deno.test("buildAmpCommand: toolAllowlist fences child to only the named tools",
     if (prevHome === undefined) Deno.env.delete("HOME");
     else Deno.env.set("HOME", prevHome);
     await Deno.remove(tmpHome, { recursive: true });
+  }
+});
+
+Deno.test("runCli: pre-aborted cancellation never launches a child", async () => {
+  const controller = new AbortController();
+  const reason = new Error("fixture cancelled before launch");
+  controller.abort(reason);
+  const error = await runCli(["missing-command-must-not-launch"], {
+    wallTimeoutMs: 10000,
+    signal: controller.signal,
+  }).then(() => null, (error) => error);
+  assertEquals(error, reason);
+});
+
+Deno.test({
+  name:
+    "runCli: cancellation rejects and terminates the owned POSIX process group",
+  ignore: posixOnly,
+  async fn() {
+    await withPidFiles(2, async ([parentFile, descendantFile]) => {
+      const descendantSource = `
+        await Deno.writeTextFile(${
+        JSON.stringify(descendantFile)
+      }, String(Deno.pid));
+        Deno.addSignalListener("SIGTERM", () => {});
+        setInterval(() => {}, 60000);
+      `;
+      const source = `
+        await Deno.writeTextFile(${
+        JSON.stringify(parentFile)
+      }, String(Deno.pid));
+        new Deno.Command(Deno.execPath(), {
+          args: ["eval", ${JSON.stringify(descendantSource)}],
+          stdout: "inherit", stderr: "inherit"
+        }).spawn();
+        Deno.addSignalListener("SIGTERM", () => {});
+        setInterval(() => {}, 60000);
+      `;
+      const controller = new AbortController();
+      const outcome = runCli(denoEval(source), {
+        wallTimeoutMs: 10000,
+        signal: controller.signal,
+      }).then(() => null, (error) => error);
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if ((await readPidFiles([parentFile, descendantFile])).length === 2) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const reason = new Error("fixture cancelled while running");
+      controller.abort(reason);
+      assertEquals(
+        await guardedInvocation(outcome, [parentFile, descendantFile], 3000),
+        reason,
+      );
+      const pids = await readPidFiles([parentFile, descendantFile]);
+      assertEquals(pids.length, 2);
+      await Promise.all(pids.map(waitForProcessExit));
+    });
+  },
+});
+
+Deno.test("runWithRetries: cancellation interrupts backoff without another invocation", async () => {
+  const dir = await Deno.makeTempDir();
+  const script = `${dir}/fixture`;
+  const countFile = `${dir}/count`;
+  await Deno.writeTextFile(
+    script,
+    `#!/bin/sh\nprintf x >> ${JSON.stringify(countFile)}\nexit 137\n`,
+  );
+  await Deno.chmod(script, 0o700);
+  const controller = new AbortController();
+  const reason = new Error("fixture cancelled during backoff");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = runWithRetries(
+      "claude",
+      script,
+      "fixture",
+      "prompt",
+      "readonly",
+      {
+        cwd: dir,
+        wallTimeoutMs: 5000,
+        idleTimeoutMs: 5000,
+        maxRetries: 2,
+        retryDelayMs: 30000,
+        signal: controller.signal,
+      },
+      {
+        info() {},
+        error() {},
+        warning() {
+          timer = setTimeout(() => controller.abort(reason), 50);
+        },
+      },
+    )
+      .then(() => null, (error) => error);
+    assertEquals(await guardedInvocation(outcome, [], 3000), reason);
+    assertEquals(await Deno.readTextFile(countFile), "x");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort(reason);
+    await Deno.remove(dir, { recursive: true });
   }
 });

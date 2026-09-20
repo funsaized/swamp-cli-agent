@@ -354,3 +354,18 @@ swamp data get my-agent transcript-<invocationId> --json
 ## License
 
 MIT — see [LICENSE.txt](LICENSE.txt) for details.
+
+
+## Caller cancellation and process ownership
+
+`invoke` and `invokeAndParse` forward an optional Swamp method-context abort
+signal through provider execution and retry backoff. Cancellation before launch
+spawns no provider; cancellation during execution rejects with the original
+reason and cleans up the owned process group. A cancelled retry delay does not
+launch another attempt. Cancellation is distinct from wall/idle timeout metadata.
+
+On POSIX, ordinary descendants in the provider's process group are terminated
+when the invocation ends, including when the provider exits before its children.
+Windows cleanup remains limited to the direct child. Descendants that create a
+new process group/session are outside this guarantee; this is not full worker
+or host isolation. Runtime cancellation requires the caller to supply the signal.

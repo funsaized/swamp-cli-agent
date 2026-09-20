@@ -1207,6 +1207,7 @@ export function arbitrateSignalOutcome(
 export async function runCli(
   cmd: string[],
   opts: {
+    signal?: AbortSignal;
     cwd?: string;
     stdin?: string;
     env?: Record<string, string>;
@@ -1217,6 +1218,7 @@ export async function runCli(
     logger?: MethodContext["logger"];
   },
 ): Promise<CmdResult> {
+  opts.signal?.throwIfAborted();
   const effectiveCmd = opts.sandbox
     ? wrapWithSandbox(
       cmd,
@@ -1432,12 +1434,21 @@ export async function runCli(
     }
   })();
 
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    if (!opts.signal) return;
+    abortListener = () => reject(opts.signal!.reason);
+    opts.signal.addEventListener("abort", abortListener, { once: true });
+    if (opts.signal.aborted) abortListener();
+  });
+
   let result: CmdResult | undefined;
   let primaryError: unknown;
   let hasPrimaryError = false;
   let cleanupError: Error | undefined;
   try {
     const status = await Promise.race([
+      aborted,
       statusPromise,
       watch.then(() => statusPromise),
       inputFailure,
@@ -1452,6 +1463,7 @@ export async function runCli(
     await drains;
     await watch;
 
+    opts.signal?.throwIfAborted();
     result = {
       stdout: new TextDecoder().decode(concatChunks(chunks)),
       stderr: new TextDecoder().decode(concatChunks(errChunks)),
@@ -1465,14 +1477,15 @@ export async function runCli(
     primaryError = error;
     hasPrimaryError = true;
   } finally {
+    if (abortListener) opts.signal?.removeEventListener("abort", abortListener);
     done = true;
     clearAllTimers();
 
-    // Any exceptional path that reaches cleanup while the child is still live
-    // gets one immediate, best-effort hard stop. Never wait on child.status
-    // here: a failed stdin pump or stream operation must not leak a provider or
-    // turn the original failure into an indefinite wait.
-    if (!childExited) {
+    // A provider can exit while ordinary descendants still hold its pipes or
+    // keep working. POSIX ownership covers that group even after its leader
+    // exits. Windows retains direct-child-only cleanup. Never wait on status
+    // here: broken streams must not turn cleanup into an indefinite wait.
+    if (Deno.build.os !== "windows" || !childExited) {
       const forced = signalTarget("SIGKILL");
       if (forced.kind === "error") cleanupError = forced.error;
     }
@@ -3564,6 +3577,21 @@ export function parseJsonResponse(
   }
 }
 
+async function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * Run a provider CLI with retries, then detect provider-reported errors.
  *
@@ -3585,6 +3613,7 @@ export async function runWithRetries(
   resolved: string,
   toolProfile: ToolProfile,
   opts: {
+    signal?: AbortSignal;
     cwd: string;
     wallTimeoutMs: number;
     idleTimeoutMs: number;
@@ -3606,6 +3635,7 @@ export async function runWithRetries(
   let attemptPrompt = resolved;
 
   while (retries <= opts.maxRetries) {
+    opts.signal?.throwIfAborted();
     const {
       cmd,
       stdin,
@@ -3630,6 +3660,7 @@ export async function runWithRetries(
       : undefined;
     try {
       lastResult = await runCli(cmd, {
+        signal: opts.signal,
         cwd: opts.cwd,
         stdin,
         env: {
@@ -3692,9 +3723,7 @@ export async function runWithRetries(
         attemptPrompt =
           `${resolved}\n\nYour previous response could not be parsed as a JSON object. Return the complete response again as exactly one valid JSON object with no markdown or trailing text.`;
       }
-      await new Promise((r) =>
-        setTimeout(r, (opts.retryDelayMs ?? 5000) * retries)
-      );
+      await retryDelay((opts.retryDelayMs ?? 5000) * retries, opts.signal);
     }
   }
 
@@ -3789,6 +3818,7 @@ function buildInvocationBase(
 
 /** Execution context provided by swamp to each method invocation. */
 type MethodContext = {
+  signal?: AbortSignal;
   globalArgs: z.infer<typeof GlobalArgsSchema>;
   definition: {
     id: string;
@@ -5152,7 +5182,7 @@ export async function collectAmpUsageWithCache(
   };
 }
 
-export const CLI_AGENT_VERSION = "2026.09.05.1";
+export const CLI_AGENT_VERSION = "2026.09.20.1";
 
 export const model = {
   type: "@funsaized/cli-agent",
@@ -5382,9 +5412,15 @@ export const model = {
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
     {
-      toVersion: CLI_AGENT_VERSION,
+      toVersion: "2026.09.05.1",
       description:
         "Honor sandboxCredentialAccess on macOS Seatbelt by exposing only the selected provider's known file-backed login credentials in provider mode; isolated mode remains fully masked. Execution-only change; no attribute rewrite needed.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: CLI_AGENT_VERSION,
+      description:
+        "Propagate caller cancellation through provider execution and retry delays, and terminate owned POSIX descendants after early parent exit. Execution-only change; no attribute rewrite needed.",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -5833,6 +5869,7 @@ export const model = {
             resolved,
             toolProfile,
             {
+              signal: context.signal,
               cwd,
               wallTimeoutMs,
               idleTimeoutMs,
@@ -6030,6 +6067,7 @@ export const model = {
             resolved,
             toolProfile,
             {
+              signal: context.signal,
               cwd,
               wallTimeoutMs,
               idleTimeoutMs,

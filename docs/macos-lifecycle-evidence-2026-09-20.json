@@ -1,0 +1,59 @@
+{
+  "observedAt": "2026-09-20T21:56:53.089Z",
+  "results": [
+    {
+      "role": "readonly",
+      "scenario": "wall",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": true,
+      "cancelled": false,
+      "durationMs": 7025
+    },
+    {
+      "role": "readonly",
+      "scenario": "early-exit",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": false,
+      "cancelled": false,
+      "durationMs": 2311
+    },
+    {
+      "role": "readonly",
+      "scenario": "cancel",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": false,
+      "cancelled": true,
+      "durationMs": null
+    },
+    {
+      "role": "actor",
+      "scenario": "wall",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": true,
+      "cancelled": false,
+      "durationMs": 7046
+    },
+    {
+      "role": "actor",
+      "scenario": "early-exit",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": false,
+      "cancelled": false,
+      "durationMs": 2316
+    },
+    {
+      "role": "actor",
+      "scenario": "cancel",
+      "passed": true,
+      "survivors": 0,
+      "timedOut": false,
+      "cancelled": true,
+      "durationMs": null
+    }
+  ]
+}

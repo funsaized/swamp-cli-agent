@@ -1207,6 +1207,7 @@ export function arbitrateSignalOutcome(
 export async function runCli(
   cmd: string[],
   opts: {
+    signal?: AbortSignal;
     cwd?: string;
     stdin?: string;
     env?: Record<string, string>;
@@ -1217,6 +1218,7 @@ export async function runCli(
     logger?: MethodContext["logger"];
   },
 ): Promise<CmdResult> {
+  opts.signal?.throwIfAborted();
   const effectiveCmd = opts.sandbox
     ? wrapWithSandbox(
       cmd,
@@ -1338,34 +1340,54 @@ export async function runCli(
     return arbitrateSignalOutcome(send, directKillFallback);
   };
 
-  const killChild = async (reason: string): Promise<void> => {
-    if (killed || childExited) return;
-    const term = signalTarget("SIGTERM");
-    if (term.kind === "error") throw term.error;
-    const attribution = timeoutAttribution(term, reason);
-    killed = attribution.killed;
-    timeoutReason = attribution.timeoutReason;
-    if (!attribution.killed) {
-      await statusPromise;
-      return;
-    }
-    const graceElapsed = await Promise.race([
-      statusPromise.then(() => false),
-      delay(SIGKILL_GRACE_MS).then(() => true),
-    ]);
-    if (Deno.build.os !== "windows" || graceElapsed) {
-      const forced = signalTarget("SIGKILL");
-      if (forced.kind === "error") {
-        const fallback = directKillFallback();
-        throw fallback.kind === "error"
-          ? new AggregateError(
-            [forced.error, fallback.error],
-            `${forced.error.message}; direct SIGKILL fallback also failed`,
-          )
-          : forced.error;
-      }
-    }
+  // Wait for the direct child for at most the SIGKILL grace. This timer is
+  // deliberately outside `timers`: clearAllTimers() must not cut a grace
+  // period short while cleanup is still waiting on it.
+  const awaitExitWithinGrace = (): Promise<boolean> => {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const elapsed = new Promise<boolean>((resolve) => {
+      graceTimer = setTimeout(() => resolve(true), SIGKILL_GRACE_MS);
+    });
+    return Promise.race([statusPromise.then(() => false), elapsed]).finally(
+      () => clearTimeout(graceTimer),
+    );
   };
+
+  // The single termination path shared by timeouts, caller cancellation, and
+  // execution failures: SIGTERM, one bounded grace for the provider to clean
+  // up its own descendants, then SIGKILL. Idempotent — concurrent callers
+  // await the same shutdown, so no branch can skip the grace with an early
+  // hard kill. Only the caller that starts it may attribute a timeout.
+  let shutdown: Promise<void> | undefined;
+  const stopChild = (timeout?: string): Promise<void> => {
+    if (shutdown) return shutdown;
+    if (childExited) return Promise.resolve();
+    shutdown = (async () => {
+      const term = signalTarget("SIGTERM");
+      if (term.kind === "error") throw term.error;
+      if (timeout !== undefined) {
+        const attribution = timeoutAttribution(term, timeout);
+        killed = attribution.killed;
+        timeoutReason = attribution.timeoutReason;
+      }
+      const graceElapsed = await awaitExitWithinGrace();
+      if (term.kind === "gone") return;
+      if (Deno.build.os !== "windows" || graceElapsed) {
+        const forced = signalTarget("SIGKILL");
+        if (forced.kind === "error") {
+          const fallback = directKillFallback();
+          throw fallback.kind === "error"
+            ? new AggregateError(
+              [forced.error, fallback.error],
+              `${forced.error.message}; direct SIGKILL fallback also failed`,
+            )
+            : forced.error;
+        }
+      }
+    })();
+    return shutdown;
+  };
+  const killChild = (reason: string): Promise<void> => stopChild(reason);
 
   let cancellingReaders = false;
   const cancelReaders = () => {
@@ -1432,12 +1454,27 @@ export async function runCli(
     }
   })();
 
+  // Cancellation settles only after the shared graceful shutdown, so a
+  // supervising child gets SIGTERM and the grace to reap its descendants.
+  // The rejection always carries the caller's original reason.
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    if (!opts.signal) return;
+    abortListener = () => {
+      const reason = opts.signal!.reason;
+      stopChild().then(() => reject(reason), () => reject(reason));
+    };
+    opts.signal.addEventListener("abort", abortListener, { once: true });
+    if (opts.signal.aborted) abortListener();
+  });
+
   let result: CmdResult | undefined;
   let primaryError: unknown;
   let hasPrimaryError = false;
   let cleanupError: Error | undefined;
   try {
     const status = await Promise.race([
+      aborted,
       statusPromise,
       watch.then(() => statusPromise),
       inputFailure,
@@ -1452,6 +1489,7 @@ export async function runCli(
     await drains;
     await watch;
 
+    opts.signal?.throwIfAborted();
     result = {
       stdout: new TextDecoder().decode(concatChunks(chunks)),
       stderr: new TextDecoder().decode(concatChunks(errChunks)),
@@ -1465,14 +1503,24 @@ export async function runCli(
     primaryError = error;
     hasPrimaryError = true;
   } finally {
+    if (abortListener) opts.signal?.removeEventListener("abort", abortListener);
     done = true;
+
+    // An exceptional path that reaches cleanup while the child is still live
+    // (or a shutdown already in flight) goes through the same bounded graceful
+    // stop. The wait is capped by SIGKILL_GRACE_MS, so broken streams cannot
+    // turn cleanup into an indefinite wait.
+    if (shutdown || !childExited) {
+      await stopChild().catch((error) => {
+        cleanupError = asError(error);
+      });
+    }
     clearAllTimers();
 
-    // Any exceptional path that reaches cleanup while the child is still live
-    // gets one immediate, best-effort hard stop. Never wait on child.status
-    // here: a failed stdin pump or stream operation must not leak a provider or
-    // turn the original failure into an indefinite wait.
-    if (!childExited) {
+    // A provider can exit while ordinary descendants still hold its pipes or
+    // keep working. POSIX ownership covers that group even after its leader
+    // exits. Windows retains direct-child-only cleanup.
+    if (Deno.build.os !== "windows" || !childExited) {
       const forced = signalTarget("SIGKILL");
       if (forced.kind === "error") cleanupError = forced.error;
     }
@@ -3564,6 +3612,21 @@ export function parseJsonResponse(
   }
 }
 
+async function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * Run a provider CLI with retries, then detect provider-reported errors.
  *
@@ -3585,6 +3648,7 @@ export async function runWithRetries(
   resolved: string,
   toolProfile: ToolProfile,
   opts: {
+    signal?: AbortSignal;
     cwd: string;
     wallTimeoutMs: number;
     idleTimeoutMs: number;
@@ -3606,6 +3670,7 @@ export async function runWithRetries(
   let attemptPrompt = resolved;
 
   while (retries <= opts.maxRetries) {
+    opts.signal?.throwIfAborted();
     const {
       cmd,
       stdin,
@@ -3630,6 +3695,7 @@ export async function runWithRetries(
       : undefined;
     try {
       lastResult = await runCli(cmd, {
+        signal: opts.signal,
         cwd: opts.cwd,
         stdin,
         env: {
@@ -3692,9 +3758,7 @@ export async function runWithRetries(
         attemptPrompt =
           `${resolved}\n\nYour previous response could not be parsed as a JSON object. Return the complete response again as exactly one valid JSON object with no markdown or trailing text.`;
       }
-      await new Promise((r) =>
-        setTimeout(r, (opts.retryDelayMs ?? 5000) * retries)
-      );
+      await retryDelay((opts.retryDelayMs ?? 5000) * retries, opts.signal);
     }
   }
 
@@ -3789,6 +3853,7 @@ function buildInvocationBase(
 
 /** Execution context provided by swamp to each method invocation. */
 type MethodContext = {
+  signal?: AbortSignal;
   globalArgs: z.infer<typeof GlobalArgsSchema>;
   definition: {
     id: string;
@@ -5152,7 +5217,7 @@ export async function collectAmpUsageWithCache(
   };
 }
 
-export const CLI_AGENT_VERSION = "2026.09.05.1";
+export const CLI_AGENT_VERSION = "2026.09.30.1";
 
 export const model = {
   type: "@funsaized/cli-agent",
@@ -5382,9 +5447,21 @@ export const model = {
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
     {
-      toVersion: CLI_AGENT_VERSION,
+      toVersion: "2026.09.05.1",
       description:
         "Honor sandboxCredentialAccess on macOS Seatbelt by exposing only the selected provider's known file-backed login credentials in provider mode; isolated mode remains fully masked. Execution-only change; no attribute rewrite needed.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.20.1",
+      description:
+        "Propagate caller cancellation through provider execution and retry delays, and terminate owned POSIX descendants after early parent exit. Execution-only change; no attribute rewrite needed.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: CLI_AGENT_VERSION,
+      description:
+        "Route caller cancellation, wall/idle timeouts, and execution failures through one idempotent graceful shutdown: SIGTERM, a bounded SIGKILL grace for the provider to reap its own descendants, then SIGKILL. Cancellation still rejects with the caller's reason. Execution-only change; no attribute rewrite needed.",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -5833,6 +5910,7 @@ export const model = {
             resolved,
             toolProfile,
             {
+              signal: context.signal,
               cwd,
               wallTimeoutMs,
               idleTimeoutMs,
@@ -6030,6 +6108,7 @@ export const model = {
             resolved,
             toolProfile,
             {
+              signal: context.signal,
               cwd,
               wallTimeoutMs,
               idleTimeoutMs,
